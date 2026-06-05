@@ -1,0 +1,119 @@
+"""
+Options Trading Journal — Home Page
+"""
+
+import streamlit as st
+from pathlib import Path
+
+from config import APP_NAME, APP_ICON, VERSION, DB_PATH
+from db.database import init_db, get_all_positions, get_contract_notes
+
+st.set_page_config(
+    page_title=APP_NAME,
+    page_icon=APP_ICON,
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+init_db()
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown(f"## {APP_ICON} {APP_NAME}")
+    st.caption(f"v{VERSION}  ·  Zerodha  ·  NSE / BSE")
+    st.divider()
+    st.markdown("""
+**Navigation**
+- 📤 **Upload** — import contract notes
+- 📒 **Trade Journal** — view strategies
+- 📊 **Dashboard** — analytics & charts
+- 🤖 **AI Coach** — insights & review
+    """)
+
+# ── Hero ──────────────────────────────────────────────────────────────────────
+st.title(f"{APP_ICON} {APP_NAME}")
+st.markdown(
+    "**Professional journal for option sellers and multi-leg strategy traders.**  \n"
+    "Upload Zerodha contract notes → auto-reconstruct strategies → track lifecycle → analyse performance."
+)
+st.divider()
+
+# ── Quick stats ───────────────────────────────────────────────────────────────
+positions = get_all_positions()
+notes     = get_contract_notes()
+
+closed = (
+    positions[
+        (positions["status"] == "CLOSED") & (positions["net_pnl"].notna())
+    ]
+    if not positions.empty
+    else positions
+)
+
+win_rate  = "—"
+total_pnl = 0.0
+if not closed.empty:
+    n_wins   = int((closed["net_pnl"] > 0).sum())
+    win_rate = f"{n_wins / len(closed) * 100:.1f}%"
+    total_pnl = float(closed["net_pnl"].sum())
+
+k1, k2, k3, k4 = st.columns(4)
+with k1:
+    st.metric("Contract Notes", len(notes))
+with k2:
+    st.metric("Total Positions", len(positions))
+with k3:
+    st.metric("Win Rate", win_rate)
+with k4:
+    delta_color = "normal" if total_pnl >= 0 else "inverse"
+    st.metric("Net P&L", f"₹{total_pnl:,.0f}", delta_color=delta_color)
+
+st.divider()
+
+# ── Feature tiles ─────────────────────────────────────────────────────────────
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    st.info("### 📤 Upload\nImport Zerodha PDF contract notes. Duplicate dates are auto-skipped.")
+with c2:
+    st.info("### 📒 Journal\nView reconstructed strategies, leg structure, lifecycle & charges.")
+with c3:
+    st.info("### 📊 Dashboard\nEquity curve, monthly P&L, strategy breakdown, drawdown analysis.")
+with c4:
+    st.info("### 🤖 AI Coach\nRule-based insights + optional Claude API for deeper coaching.")
+
+st.divider()
+
+# ── Database management ───────────────────────────────────────────────────────
+with st.expander("⚙️ Database Management", expanded=False):
+    st.markdown(
+        "**Local use:** the SQLite database is saved alongside this app.  \n"
+        "**Streamlit Cloud:** the filesystem resets on redeploy — export your DB regularly "
+        "and re-import after redeploy."
+    )
+    col_exp, col_imp = st.columns(2)
+
+    with col_exp:
+        if st.button("⬇️ Export Database"):
+            if Path(DB_PATH).exists():
+                from db.database import export_db_bytes
+                db_bytes = export_db_bytes()
+                st.download_button(
+                    label="💾 Download trading_journal.db",
+                    data=db_bytes,
+                    file_name="trading_journal.db",
+                    mime="application/octet-stream",
+                )
+            else:
+                st.warning("No database file found yet.")
+
+    with col_imp:
+        uploaded_db = st.file_uploader(
+            "⬆️ Import Database (.db)", type=["db"], key="db_import"
+        )
+        if uploaded_db is not None:
+            from db.database import import_db_bytes
+            try:
+                import_db_bytes(uploaded_db.read())
+                st.success("✅ Database imported. Refresh the page to see your data.")
+            except ValueError as exc:
+                st.error(str(exc))

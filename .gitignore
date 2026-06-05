@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+*.db
+*.db-bak
+*.sqlite
+.streamlit/secrets.toml
+venv/
+.venv/
+dist/
+build/
+*.egg-info/
+.DS_Store
