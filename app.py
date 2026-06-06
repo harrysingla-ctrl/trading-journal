@@ -22,13 +22,13 @@ with st.sidebar:
     st.markdown(f"## {APP_ICON} {APP_NAME}")
     st.caption(f"v{VERSION}  ·  Zerodha  ·  NSE / BSE")
     st.divider()
-    st.markdown("""
-**Navigation**
-- 📤 **Upload** — import contract notes
-- 📒 **Trade Journal** — view strategies
-- 📊 **Dashboard** — analytics & charts
-- 🤖 **AI Coach** — insights & review
-    """)
+
+    st.markdown("**Navigate**")
+    st.page_link("app.py",                        label="🏠 Home",          use_container_width=True)
+    st.page_link("pages/1_Upload.py",             label="📤 Upload",        use_container_width=True)
+    st.page_link("pages/2_Trade_Journal.py",      label="📒 Trade Journal", use_container_width=True)
+    st.page_link("pages/3_Dashboard.py",          label="📊 Dashboard",     use_container_width=True)
+    st.page_link("pages/4_AI_Coach.py",           label="🤖 AI Coach",      use_container_width=True)
 
 # ── Hero ──────────────────────────────────────────────────────────────────────
 st.title(f"{APP_ICON} {APP_NAME}")
@@ -43,43 +43,44 @@ positions = get_all_positions()
 notes     = get_contract_notes()
 
 closed = (
-    positions[
-        (positions["status"] == "CLOSED") & (positions["net_pnl"].notna())
-    ]
-    if not positions.empty
-    else positions
+    positions[(positions["status"] == "CLOSED") & (positions["net_pnl"].notna())]
+    if not positions.empty else positions
 )
 
 win_rate  = "—"
 total_pnl = 0.0
 if not closed.empty:
-    n_wins   = int((closed["net_pnl"] > 0).sum())
-    win_rate = f"{n_wins / len(closed) * 100:.1f}%"
+    n_wins    = int((closed["net_pnl"] > 0).sum())
+    win_rate  = f"{n_wins / len(closed) * 100:.1f}%"
     total_pnl = float(closed["net_pnl"].sum())
 
 k1, k2, k3, k4 = st.columns(4)
-with k1:
-    st.metric("Contract Notes", len(notes))
-with k2:
-    st.metric("Total Positions", len(positions))
-with k3:
-    st.metric("Win Rate", win_rate)
-with k4:
-    delta_color = "normal" if total_pnl >= 0 else "inverse"
-    st.metric("Net P&L", f"₹{total_pnl:,.0f}", delta_color=delta_color)
+k1.metric("Contract Notes", len(notes))
+k2.metric("Total Positions", len(positions))
+k3.metric("Win Rate", win_rate)
+k4.metric("Net P&L", f"₹{total_pnl:,.0f}",
+          delta_color="normal" if total_pnl >= 0 else "inverse")
 
 st.divider()
 
-# ── Feature tiles ─────────────────────────────────────────────────────────────
+# ── Navigation tiles ──────────────────────────────────────────────────────────
 c1, c2, c3, c4 = st.columns(4)
+
 with c1:
-    st.info("### 📤 Upload\nImport Zerodha PDF contract notes. Duplicate dates are auto-skipped.")
+    st.page_link("pages/1_Upload.py", label="📤 Upload", use_container_width=True)
+    st.caption("Import Zerodha PDF contract notes. Duplicate dates are auto-skipped.")
+
 with c2:
-    st.info("### 📒 Journal\nView reconstructed strategies, leg structure, lifecycle & charges.")
+    st.page_link("pages/2_Trade_Journal.py", label="📒 Trade Journal", use_container_width=True)
+    st.caption("View reconstructed strategies, leg structure, lifecycle & charges.")
+
 with c3:
-    st.info("### 📊 Dashboard\nEquity curve, monthly P&L, strategy breakdown, drawdown analysis.")
+    st.page_link("pages/3_Dashboard.py", label="📊 Dashboard", use_container_width=True)
+    st.caption("Equity curve, monthly P&L, strategy breakdown, drawdown analysis.")
+
 with c4:
-    st.info("### 🤖 AI Coach\nRule-based insights + optional Claude API for deeper coaching.")
+    st.page_link("pages/4_AI_Coach.py", label="🤖 AI Coach", use_container_width=True)
+    st.caption("Rule-based insights + optional Claude API for deeper coaching.")
 
 st.divider()
 
@@ -96,10 +97,9 @@ with st.expander("⚙️ Database Management", expanded=False):
         if st.button("⬇️ Export Database"):
             if Path(DB_PATH).exists():
                 from db.database import export_db_bytes
-                db_bytes = export_db_bytes()
                 st.download_button(
                     label="💾 Download trading_journal.db",
-                    data=db_bytes,
+                    data=export_db_bytes(),
                     file_name="trading_journal.db",
                     mime="application/octet-stream",
                 )
@@ -107,13 +107,11 @@ with st.expander("⚙️ Database Management", expanded=False):
                 st.warning("No database file found yet.")
 
     with col_imp:
-        uploaded_db = st.file_uploader(
-            "⬆️ Import Database (.db)", type=["db"], key="db_import"
-        )
+        uploaded_db = st.file_uploader("⬆️ Import Database (.db)", type=["db"], key="db_import")
         if uploaded_db is not None:
             from db.database import import_db_bytes
             try:
                 import_db_bytes(uploaded_db.read())
-                st.success("✅ Database imported. Refresh the page to see your data.")
+                st.success("✅ Database imported. Refresh the page.")
             except ValueError as exc:
                 st.error(str(exc))
