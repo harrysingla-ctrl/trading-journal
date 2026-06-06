@@ -9,7 +9,7 @@ from db.database import (
     init_db, insert_contract_note, insert_raw_trades,
     mark_contract_note_processed, get_contract_notes,
     contract_note_exists, insert_position, insert_position_legs,
-    mark_trades_assigned,
+    mark_trades_assigned, get_setting, set_setting,
 )
 from core.parser import parse_contract_note
 from core.clustering import cluster_and_classify
@@ -25,18 +25,61 @@ st.set_page_config(
 )
 init_db()
 
+# ── Sidebar: PDF password settings ───────────────────────────────────────────
+with st.sidebar:
+    st.subheader("⚙️ PDF Password")
+    st.caption(
+        "Zerodha contract notes are password-protected by default.  \n"
+        "Common passwords: **PAN number** (e.g. ABCDE1234F) or **date of birth** (DDMMYYYY)."
+    )
+
+    saved_pw = get_setting("pdf_password", "")
+
+    pdf_password = st.text_input(
+        "Password",
+        value=saved_pw,
+        type="password",
+        placeholder="e.g. ABCDE1234F",
+        help="Password is stored locally in your database. Never sent anywhere.",
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("💾 Save", use_container_width=True):
+            set_setting("pdf_password", pdf_password)
+            st.success("Saved!")
+            st.rerun()
+    with c2:
+        if st.button("🗑 Clear", use_container_width=True):
+            set_setting("pdf_password", "")
+            pdf_password = ""
+            st.success("Cleared!")
+            st.rerun()
+
+    st.divider()
+    if saved_pw:
+        st.success("✅ Password configured")
+    else:
+        st.warning("⚠️ No password set")
+
+    st.caption(
+        "Password is saved in your local SQLite database and never transmitted."
+    )
+
+# ── Main content ──────────────────────────────────────────────────────────────
 st.title("📤 Upload Contract Notes")
 st.caption(
-    "Upload one or more Zerodha contract note PDFs. "
-    "Strategies are automatically reconstructed from your fills."
+    "Upload Zerodha contract note PDFs. "
+    "Individual fills are extracted from **Annexure A** and "
+    "automatically clustered into strategies."
 )
 
-# ── File upload ───────────────────────────────────────────────────────────────
+# ── File uploader ─────────────────────────────────────────────────────────────
 uploaded_files = st.file_uploader(
     "Select Zerodha contract note PDF(s)",
     type=["pdf"],
     accept_multiple_files=True,
-    help="Supports the standard Zerodha contract note format (NSE + BSE options).",
+    help="Supports the standard Zerodha contract note format (NSE + BSE F&O).",
 )
 
 if uploaded_files:
@@ -45,13 +88,29 @@ if uploaded_files:
         st.subheader(f"📄 {uploaded_file.name}")
 
         with st.spinner("Parsing PDF…"):
-            result = parse_contract_note(uploaded_file.read(), uploaded_file.name)
+            result = parse_contract_note(
+                uploaded_file.read(),
+                uploaded_file.name,
+                password=saved_pw,
+            )
+
+        # ── Password error ────────────────────────────────────────────────
+        if result.get("needs_password"):
+            st.error(
+                "🔒 **PDF is password-protected** and the current password is "
+                "incorrect or not set.  \n\n"
+                "Set the correct password in the **sidebar** on the left, then re-upload.  \n"
+                "For Zerodha, this is usually your **PAN number** (e.g. ABCDE1234F) "
+                "or **date of birth** (DDMMYYYY)."
+            )
+            continue
 
         trade_date = result["trade_date"]
         client_id  = result["client_id"]
         trades     = result["trades"]
         warnings   = result["parse_warnings"]
 
+        # ── Parser warnings ───────────────────────────────────────────────
         if warnings:
             with st.expander(f"⚠️ {len(warnings)} parser warning(s)", expanded=False):
                 for w in warnings:
@@ -59,72 +118,81 @@ if uploaded_files:
 
         if not trades:
             st.error(
-                "No option trades could be extracted. "
-                "Please check this is a Zerodha F&O contract note."
+                "No option trades found. "
+                "Ensure this is a Zerodha F&O contract note containing Annexure A."
             )
             continue
 
         trades_df = pd.DataFrame(trades)
 
-        col_info1, col_info2, col_info3 = st.columns(3)
-        col_info1.metric("Fills extracted", len(trades))
-        col_info2.metric("Trade date", trade_date)
-        col_info3.metric("Client ID", client_id or "—")
+        # ── Summary metrics ───────────────────────────────────────────────
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Fills extracted", len(trades))
+        col2.metric("Trade date",      trade_date or "—")
+        col3.metric("Client ID",       client_id  or "—")
 
+        n_underlying = trades_df["underlying"].nunique() if not trades_df.empty else 0
+        col4.metric("Underlyings",     n_underlying)
+
+        # ── Preview ───────────────────────────────────────────────────────
         with st.expander("Preview extracted fills", expanded=True):
-            show_cols = [
-                c for c in
+            show_cols = [c for c in
                 ["trade_datetime", "underlying", "expiry", "strike",
-                 "option_type", "buy_sell", "quantity", "price"]
-                if c in trades_df.columns
-            ]
-            st.dataframe(trades_df[show_cols], use_container_width=True, hide_index=True)
+                 "option_type", "buy_sell", "quantity", "price", "exchange"]
+                if c in trades_df.columns]
+            st.dataframe(
+                trades_df[show_cols].sort_values("trade_datetime"),
+                use_container_width=True,
+                hide_index=True,
+            )
 
-        # Duplicate guard
+            # Quick sanity check
+            buy_val  = float((trades_df[trades_df["buy_sell"]=="B"]["price"]
+                              * trades_df[trades_df["buy_sell"]=="B"]["quantity"]).sum())
+            sell_val = float((trades_df[trades_df["buy_sell"]=="S"]["price"]
+                              * trades_df[trades_df["buy_sell"]=="S"]["quantity"]).sum())
+            sc1, sc2 = st.columns(2)
+            sc1.caption(f"Total buy value: ₹{buy_val:,.0f}")
+            sc2.caption(f"Total sell value: ₹{sell_val:,.0f}")
+
+        # ── Duplicate guard ───────────────────────────────────────────────
         if contract_note_exists(uploaded_file.name, trade_date):
             st.warning(
-                f"⚠️ A contract note for **{trade_date}** with this filename already exists. "
-                "Skipping to prevent duplicate imports."
+                f"⚠️ A contract note for **{trade_date}** with this filename already "
+                "exists. Skipping to prevent duplicates."
             )
             continue
 
+        # ── Import button ─────────────────────────────────────────────────
         if st.button(
             f"💾 Import {len(trades)} fills from {trade_date}",
             key=f"import_{uploaded_file.name}",
+            type="primary",
         ):
             with st.spinner("Saving fills and clustering strategies…"):
 
-                # 1. Save contract note record
-                note_id = insert_contract_note(
-                    uploaded_file.name, trade_date, client_id
-                )
-
-                # 2. Save raw trades → get auto-generated IDs
+                note_id   = insert_contract_note(uploaded_file.name, trade_date, client_id)
                 trade_ids = insert_raw_trades(trades, note_id)
                 trades_df["id"] = trade_ids
 
-                # 3. Cluster fills into strategy positions
                 positions = cluster_and_classify(trades_df)
 
-                # 4. Calculate P&L for each position and persist
                 for pos in positions:
                     pos_trade_ids = [lg["id"] for lg in pos.get("all_legs", [])]
                     pos_trades    = trades_df[trades_df["id"].isin(pos_trade_ids)]
 
                     pnl = calculate_position_pnl(pos_trades)
-                    pos["gross_pnl"]    = pnl["gross_pnl"]
-                    pos["net_pnl"]      = pnl["net_pnl"]
+                    pos["gross_pnl"]     = pnl["gross_pnl"]
+                    pos["net_pnl"]       = pnl["net_pnl"]
                     pos["total_charges"] = pnl["total_charges"]
-                    pos["max_capital"]  = estimate_max_capital(pos_trades)
+                    pos["max_capital"]   = estimate_max_capital(pos_trades)
 
-                    # Determine status from trade balance
-                    inferred_status = position_status_from_trades(pos_trades)
+                    inferred = position_status_from_trades(pos_trades)
                     if pos.get("status") != "CLOSED":
-                        pos["status"] = inferred_status
+                        pos["status"] = inferred
 
                     insert_position(pos)
-
-                    leg_records = [
+                    insert_position_legs([
                         {
                             "position_id":  pos["position_id"],
                             "raw_trade_id": lg["id"],
@@ -132,8 +200,7 @@ if uploaded_files:
                             "sequence_no":  seq,
                         }
                         for seq, lg in enumerate(pos.get("all_legs", []))
-                    ]
-                    insert_position_legs(leg_records)
+                    ])
                     mark_trades_assigned(pos_trade_ids)
 
                 mark_contract_note_processed(note_id)
@@ -141,7 +208,8 @@ if uploaded_files:
             n_closed = sum(1 for p in positions if p.get("status") == "CLOSED")
             n_open   = len(positions) - n_closed
             st.success(
-                f"✅ Imported **{len(trades)}** fills across **{len(positions)}** positions — "
+                f"✅ Imported **{len(trades)}** fills into "
+                f"**{len(positions)}** positions — "
                 f"**{n_closed}** closed, **{n_open}** open."
             )
             st.balloons()
