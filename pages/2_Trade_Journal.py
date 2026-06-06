@@ -16,6 +16,14 @@ st.set_page_config(
 )
 init_db()
 
+# ── Sidebar navigation ───────────────────────────────────────────────────────
+with st.sidebar:
+    st.page_link("app.py",                   label="🏠 Home",          use_container_width=True)
+    st.page_link("pages/1_Upload.py",         label="📤 Upload",        use_container_width=True)
+    st.page_link("pages/2_Trade_Journal.py", label="📒 Trade Journal", use_container_width=True)
+    st.page_link("pages/3_Dashboard.py",     label="📊 Dashboard",     use_container_width=True)
+    st.page_link("pages/4_AI_Coach.py",      label="🤖 AI Coach",      use_container_width=True)
+
 st.title("📒 Trade Journal")
 st.caption("Every strategy reconstructed from fills — with lifecycle, leg structure, and charge breakdown.")
 
