@@ -186,8 +186,14 @@ if uploaded_files:
                 positions = cluster_and_classify(trades_df)
 
                 for pos in positions:
-                    pos_trade_ids = [lg["id"] for lg in pos.get("all_legs", [])]
-                    pos_trades    = trades_df[trades_df["id"].isin(pos_trade_ids)]
+                    # Collect ALL fill IDs (aggregated order may cover many fills)
+                    all_fill_ids = []
+                    for lg in pos.get("all_legs", []):
+                        fids = lg.get("fill_ids", [lg["id"]])
+                        all_fill_ids.extend(fids if isinstance(fids, list) else [fids])
+
+                    # P&L uses actual fills for accurate per-fill charge calculation
+                    pos_trades = trades_df[trades_df["id"].isin(all_fill_ids)]
 
                     pnl = calculate_position_pnl(pos_trades)
                     pos["gross_pnl"]     = pnl["gross_pnl"]
@@ -200,16 +206,22 @@ if uploaded_files:
                         pos["status"] = inferred
 
                     insert_position(pos)
-                    insert_position_legs([
-                        {
-                            "position_id":  pos["position_id"],
-                            "raw_trade_id": lg["id"],
-                            "leg_role":     lg["role"],
-                            "sequence_no":  seq,
-                        }
-                        for seq, lg in enumerate(pos.get("all_legs", []))
-                    ])
-                    mark_trades_assigned(pos_trade_ids)
+
+                    # Link every fill (not just WAP row) to the position
+                    leg_records = []
+                    for seq, lg in enumerate(pos.get("all_legs", [])):
+                        fids = lg.get("fill_ids", [lg["id"]])
+                        if not isinstance(fids, list):
+                            fids = [fids]
+                        for fid in fids:
+                            leg_records.append({
+                                "position_id":  pos["position_id"],
+                                "raw_trade_id": fid,
+                                "leg_role":     lg["role"],
+                                "sequence_no":  seq,
+                            })
+                    insert_position_legs(leg_records)
+                    mark_trades_assigned(all_fill_ids)
 
                 mark_contract_note_processed(note_id)
 
