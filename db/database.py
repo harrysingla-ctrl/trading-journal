@@ -96,7 +96,35 @@ def init_db() -> None:
             ON positions(underlying, entry_datetime);
         CREATE INDEX IF NOT EXISTS idx_pos_legs_pos
             ON position_legs(position_id);
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT ''
+        );
     """)
+    conn.commit()
+    conn.close()
+
+
+# ── App Settings ──────────────────────────────────────────────────────────────
+
+def get_setting(key: str, default: str = "") -> str:
+    """Retrieve a persisted app setting by key."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT value FROM app_settings WHERE key=?", (key,)
+    ).fetchone()
+    conn.close()
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    """Persist an app setting."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
+        (key, value),
+    )
     conn.commit()
     conn.close()
 
