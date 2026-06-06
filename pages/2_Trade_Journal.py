@@ -130,7 +130,7 @@ for _, row in filtered.iterrows():
                  "price", "strike", "option_type", "expiry"]
                 if c in pos_trades.columns
             ]
-            styled = pos_trades[show_cols].style.applymap(style_role, subset=["leg_role"])
+            styled = pos_trades[show_cols].style.map(style_role, subset=["leg_role"])
             st.dataframe(styled, use_container_width=True, hide_index=True)
 
             # ── Charge breakdown ──────────────────────────────────────────────
