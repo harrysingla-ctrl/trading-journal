@@ -35,10 +35,78 @@ def cluster_and_classify(raw_trades: pd.DataFrame) -> List[Dict]:
     df["trade_dt"] = pd.to_datetime(df["trade_datetime"])
     df = df.sort_values("trade_dt").reset_index(drop=True)
 
+    # ── Aggregate fills → orders before clustering ────────────────────────
+    # A single order can produce dozens of fills (partial executions).
+    # Grouping by order_no gives one row per order with WAP price and total qty,
+    # so strategy detection sees "SELL 500 lots @ 125.10" not 10×50 lots.
+    df = _aggregate_fills_to_orders(df)
+
     all_positions: List[Dict] = []
     for underlying, group in df.groupby("underlying"):
         all_positions.extend(_process_underlying(group.copy(), str(underlying)))
     return all_positions
+
+
+def _aggregate_fills_to_orders(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Combine fills that share the same order_no + contract into a single row.
+
+    - Quantity  : summed
+    - Price     : WAP  (sum of price×qty / total qty)
+    - fill_ids  : list of all raw_trade ids in this order  ← used later for
+                  position_legs so every fill is still linked to the position
+    - trade_dt  : earliest fill time of the order
+    """
+    if df.empty:
+        return df
+
+    df = df.copy()
+
+    # Normalise order_no (may be empty string or NaN for some formats)
+    if "order_no" in df.columns:
+        df["_ono"] = df["order_no"].fillna("").astype(str).str.strip()
+    else:
+        df["_ono"] = ""
+
+    rows: List[dict] = []
+
+    grp_keys = ["_ono", "underlying", "expiry", "strike", "option_type", "buy_sell"]
+    grp_keys = [k for k in grp_keys if k in df.columns]
+
+    for _, grp in df.groupby(grp_keys, sort=False, dropna=False):
+        grp = grp.sort_values("trade_dt").reset_index(drop=True)
+        ono = str(grp.iloc[0].get("_ono", ""))
+
+        # No valid order_no OR single fill → no aggregation needed
+        if ono == "" or len(grp) == 1:
+            for _, row in grp.iterrows():
+                r = row.to_dict()
+                r["fill_ids"] = [int(row["id"])]
+                rows.append(r)
+            continue
+
+        # Multiple fills of same order: aggregate
+        total_qty = int(grp["quantity"].sum())
+        wap = (
+            float((grp["price"] * grp["quantity"]).sum()) / total_qty
+            if total_qty > 0 else float(grp["price"].mean())
+        )
+
+        base = grp.iloc[0].to_dict()
+        base["quantity"]     = total_qty
+        base["price"]        = round(wap, 4)
+        base["gross_amount"] = round(total_qty * wap, 2)
+        base["net_amount"]   = round(total_qty * wap, 2)
+        base["fill_ids"]     = [int(i) for i in grp["id"].tolist()]
+        rows.append(base)
+
+    if not rows:
+        return df
+
+    result = pd.DataFrame(rows)
+    result = result.drop(columns=["_ono"], errors="ignore")
+    result = result.sort_values("trade_dt").reset_index(drop=True)
+    return result
 
 
 def detect_strategy(legs: pd.DataFrame) -> Tuple[str, float, str]:
@@ -71,33 +139,65 @@ def _process_underlying(group: pd.DataFrame, underlying: str) -> List[Dict]:
     cluster_last_dt = None
 
     def flush_cluster() -> None:
+        nonlocal cluster_last_dt
         if not cluster_trades:
             return
         pos = _new_position(pd.DataFrame(cluster_trades), underlying)
         open_positions[pos["position_id"]] = pos
         cluster_trades.clear()
+        cluster_last_dt = None
 
     for _, trade in group.sort_values("trade_dt").iterrows():
-        matched_id = _find_match(trade, open_positions)
 
-        if matched_id:
-            flush_cluster()
-            _apply_trade_to_position(open_positions[matched_id], trade)
-            if _is_closed(open_positions[matched_id]):
-                finalized.append(open_positions.pop(matched_id))
-            continue
-
+        # ── 1. Flush stale cluster on time-gap BEFORE matching ────────────
+        # Critical: the cluster must become an open position before an exit
+        # trade can be matched against it (e.g. SELL at 13:12, BUY at 14:15).
         if cluster_last_dt is not None:
             gap_min = (trade["trade_dt"] - cluster_last_dt).total_seconds() / 60
             if gap_min > CLUSTER_WINDOW_MINUTES:
                 flush_cluster()
 
+        # ── 2. Check existing open positions ─────────────────────────────
+        matched_id = _find_match(trade, open_positions)
+
+        # ── 3. Check current cluster (intraday round-trip < 10 min) ──────
+        # e.g. sell at 13:12, buy back at 13:15 — both in same time window.
+        if not matched_id and cluster_trades:
+            if _cluster_has_match(trade, cluster_trades):
+                flush_cluster()
+                matched_id = _find_match(trade, open_positions)
+
+        if matched_id:
+            _apply_trade_to_position(open_positions[matched_id], trade)
+            if _is_closed(open_positions[matched_id]):
+                finalized.append(open_positions.pop(matched_id))
+            continue
+
+        # ── 4. No match → add to current entry cluster ────────────────────
         cluster_trades.append(trade)
         cluster_last_dt = trade["trade_dt"]
 
     flush_cluster()
     finalized.extend(open_positions.values())
     return finalized
+
+
+def _cluster_has_match(trade: pd.Series, cluster_trades: list) -> bool:
+    """Return True if any trade in the current cluster is the opposite leg of this trade."""
+    t_exp = trade.get("expiry")
+    t_str = float(trade.get("strike") or 0)
+    t_typ = trade.get("option_type")
+    t_bs  = trade["buy_sell"]
+    t_und = str(trade["underlying"])
+
+    for ct in cluster_trades:
+        if (str(ct.get("underlying")) == t_und
+                and ct.get("expiry")      == t_exp
+                and abs(float(ct.get("strike") or 0) - t_str) < 0.01
+                and ct.get("option_type") == t_typ
+                and ct["buy_sell"]        != t_bs):
+            return True
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -168,8 +268,13 @@ def _apply_trade_to_position(pos: Dict, trade: pd.Series) -> None:
             "option_type": t_type, "buy_sell": t_bs, "quantity": t_qty,
         })
 
+    fill_ids = trade.get("fill_ids", None)
+    if not isinstance(fill_ids, list):
+        fill_ids = [int(trade["id"])]
+
     pos.setdefault("all_legs", []).append({
-        "id":          trade["id"],
+        "id":          int(trade["id"]),
+        "fill_ids":    fill_ids,
         "role":        role,
         "expiry":      t_exp,
         "strike":      t_strike,
@@ -208,6 +313,10 @@ def _new_position(cluster: pd.DataFrame, underlying: str) -> Dict:
     all_legs:  List[Dict] = []
 
     for _, t in cluster.iterrows():
+        fill_ids = t.get("fill_ids", None)
+        if not isinstance(fill_ids, list):
+            fill_ids = [int(t["id"])]
+
         open_legs.append({
             "expiry":      t.get("expiry"),
             "strike":      t.get("strike"),
@@ -216,7 +325,8 @@ def _new_position(cluster: pd.DataFrame, underlying: str) -> Dict:
             "quantity":    int(t["quantity"]),
         })
         all_legs.append({
-            "id":          t["id"],
+            "id":          int(t["id"]),
+            "fill_ids":    fill_ids,
             "role":        "ENTRY",
             "expiry":      t.get("expiry"),
             "strike":      t.get("strike"),
